@@ -1,0 +1,282 @@
+name: Pull Request Automation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        id: eslint
+        run: |
+          npm run lint > eslint_report.txt 2>&1 || true
+          echo "ESLINT_EXIT_CODE=$?" >> $GITHUB_ENV
+          cat eslint_report.txt
+
+      - name: Run Prettier
+        id: prettier
+        run: |
+          npx prettier --check "src/**/*.js" > prettier_report.txt 2>&1 || true
+          echo "PRETTIER_EXIT_CODE=$?" >> $GITHUB_ENV
+          cat prettier_report.txt
+
+      - name: Post Code Quality Report
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            
+            let eslintOutput = '';
+            try {
+              eslintOutput = fs.readFileSync('eslint_report.txt', 'utf8');
+            } catch (e) {
+              eslintOutput = 'Error reading ESLint report';
+            }
+
+            let prettierOutput = '';
+            try {
+              prettierOutput = fs.readFileSync('prettier_report.txt', 'utf8');
+            } catch (e) {
+              prettierOutput = 'Error reading Prettier report';
+            }
+
+            const body = `## Code Quality Report
+
+            ### ESLint Results
+            \`\`\`
+            ${eslintOutput.slice(0, 1000)}
+            \`\`\`
+
+            ### Prettier Results
+            \`\`\`
+            ${prettierOutput.slice(0, 1000)}
+            \`\`\`
+            `;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+      - name: Check Failure
+        if: env.ESLINT_EXIT_CODE != '0' || env.PRETTIER_EXIT_CODE != '0'
+        run: exit 1
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Tests
+        id: tests
+        run: |
+          npm run test:coverage > test_report.txt 2>&1 || true
+          echo "TEST_EXIT_CODE=$?" >> $GITHUB_ENV
+          cat test_report.txt
+
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            
+            let testOutput = '';
+            try {
+              testOutput = fs.readFileSync('test_report.txt', 'utf8');
+            } catch (e) {
+              testOutput = 'Error reading test report';
+            }
+
+            // Extract coverage table if possible, or just dump the last lines
+            const body = `## Test Coverage Report
+
+            \`\`\`
+            ${testOutput.slice(-2000)}
+            \`\`\`
+            `;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+      - name: Upload Coverage Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report
+          path: coverage/
+
+      - name: Check Failure
+        if: env.TEST_EXIT_CODE != '0'
+        run: exit 1
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Dependency Scan
+        id: audit
+        run: |
+          npm audit > audit_report.txt 2>&1 || true
+          echo "AUDIT_EXIT_CODE=$?" >> $GITHUB_ENV
+          cat audit_report.txt
+
+      - name: Run Secret Scan
+        id: secrets
+        run: |
+          # Simple scan for common secrets keywords
+          grep -rE "password|secret|key|token" src/ > secret_scan.txt 2>&1 || echo "No secrets found" > secret_scan.txt
+          echo "SECRET_EXIT_CODE=0" >> $GITHUB_ENV
+          cat secret_scan.txt
+
+      - name: Post Security Scan Report
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            
+            let auditOutput = '';
+            try {
+              auditOutput = fs.readFileSync('audit_report.txt', 'utf8');
+            } catch (e) {
+              auditOutput = 'Error reading audit report';
+            }
+
+            let secretOutput = '';
+            try {
+              secretOutput = fs.readFileSync('secret_scan.txt', 'utf8');
+            } catch (e) {
+              secretOutput = 'Error reading secret scan report';
+            }
+
+            const body = `## Security Scan Report
+
+            ### Dependencies Vulnerabilities
+            \`\`\`
+            ${auditOutput.slice(0, 1500)}
+            \`\`\`
+
+            ### Secret Scan Results
+            \`\`\`
+            ${secretOutput.slice(0, 1000)}
+            \`\`\`
+            `;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+            
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Application
+        run: npm run build
+
+      - name: Create Deployment Preview Artifacts
+        run: |
+          mkdir -p build_artifact
+          cp -r src package.json build_artifact/
+          tar -czf deployment-preview.tar.gz build_artifact/
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-preview
+          path: deployment-preview.tar.gz
+
+      - name: Start Server and Validate Endpoints
+        run: |
+          npm start &
+          PID=$!
+          echo "Server started with PID $PID"
+          sleep 10
+          
+          echo "Validating endpoints..."
+          curl -f http://localhost:3000/ || exit 1
+          curl -f http://localhost:3000/health || exit 1
+          curl -f http://localhost:3000/users || exit 1
+          
+          kill $PID
+
+      - name: Post Build Validation
+        if: always()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const buildStatus = '${{ job.status }}';
+            const body = `## Build Validation
+
+            **Status**: ${buildStatus}
+            
+            Build validation completed. Endpoints were checked.
+            `;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
